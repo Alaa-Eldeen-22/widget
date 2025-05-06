@@ -1,0 +1,542 @@
+<script type="module">
+    // --- PostHog Snippet Start ---
+    !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="capture identify alias people.set people.set_once set_config register register_once unregister opt_out_capturing has_opted_out_capturing opt_in_capturing reset isFeatureEnabled onFeatureFlags".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+    posthog.init('phc_t524OyL9OnnYrkRfYV8hvgiSByVbag7tuL31bvet9qf', { api_host: 'https://eu.i.posthog.com' , person_profiles: 'always'}); // TODO: Replace with your actual key and URL
+    // --- PostHog Snippet End ---
+
+    import Chatbot from "https://cdn.jsdelivr.net/gh/JoeFarag-00/FlowiseChatEmbed-eChat/dist/web.js";
+
+    let lastProcessedMessage = ""; // Track the last processed message
+    let messageList = []; // Store all messages temporarily
+    let audio = null; // Store the audio object for playback control
+    let isPlaying = false; // Track if audio is currently playing
+    let ttsEnabled = false;
+    let ttsDebounceTimeout;
+    let schatflowId, apiHost, googleTtsApi, stokenerEndpoint, apiKey;
+    let lastUserMessageTimestamp = null; // For response time calculation
+    let lastUserMessageContent = null; // Store last user message content
+        
+    // --- PostHog User Identification ---
+    function generateUUID() { // Public Domain/MIT
+        var d = new Date().getTime();//Timestamp
+        var d2 = ((typeof performance !== 'undefined') && performance.now && (performance.now()*1000)) || 0;//Time in microseconds since page-load or 0 if unsupported
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16;//random number between 0 and 16
+            if(d > 0){//Use timestamp until depleted
+                r = (d + r)%16 | 0;
+                d = Math.floor(d/16);
+            } else {//Use microseconds since page-load if supported
+                r = (d2 + r)%16 | 0;
+                d2 = Math.floor(d2/16);
+            }
+            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+    }
+
+    function getOrSetUserID() {
+        let userID = localStorage.getItem('chatUserID');
+        if (!userID) {
+            userID = generateUUID();
+            localStorage.setItem('chatUserID', userID);
+            console.log('Generated new user ID for PostHog:', userID);
+        } else {
+            console.log('Using existing user ID for PostHog:', userID);
+        }
+        return userID;
+    }
+    // --- End PostHog User Identification ---
+
+    function cleanMessage(message) {
+        // 🧹 Remove any URLs, whether plain or inside brackets
+        message = message.replace(/\[?\b(?:https?:\/\/|www\.)\S+\]?/gi, '');
+        message = message.replace(/\[!\[.*?\]\(.*?\)\]\(.*?\)/g, '');
+        message = message.replace(/\[.*?\]\(.*?\)/g, '');
+        // 🧹 Remove unnecessary special characters, keeping Arabic, English letters, and punctuation
+        return message.replace(/[^a-zA-Z\u0600-\u06FF0-9.,? ]/g, '').trim();
+    }
+
+    // Function to create and append the button to the DOM
+    function createTitleWithPlayButton() {
+        const titleContainer = document.createElement("div");
+        titleContainer.classList.add("chat-title-container");
+    
+        // إنشاء عنوان الدردشة
+        const titleElement = document.createElement("span");
+        titleElement.textContent = "E - Chat";
+    
+        // إنشاء زر التشغيل
+        const playButton = document.createElement("button");
+        playButton.id = "playButton";
+        playButton.textContent = "🔇"; // default: muted (TTS off)
+        window.playButtonRef = playButton;
+       // Add hover CSS styling:
+        playButton.style.border = "none";
+        playButton.style.background = "none";
+        playButton.style.cursor = "pointer";
+        playButton.style.fontSize = "24px";
+        playButton.style.transition = "background-color 0.3s ease";
+        playButton.onmouseover = () => { playButton.style.backgroundColor = "#e0e0e0"; };
+        playButton.onmouseout = () => { playButton.style.backgroundColor = "transparent"; };
+        playButton.onclick = toggleAudioPlayback;
+        
+        // تطبيق مسافة بين العنوان والزر
+        titleContainer.style.display = "flex";
+        titleContainer.style.alignItems = "center";
+        titleContainer.style.gap = "30px"; // هذه تضيف مسافة بين العناصر
+    
+        titleContainer.appendChild(titleElement);
+        titleContainer.appendChild(playButton);
+    
+        return titleContainer;
+    }
+    
+
+    function toggleAudioPlayback() {
+        ttsEnabled = !ttsEnabled;
+        if (window.playButtonRef) {
+          if (ttsEnabled) {
+            window.playButtonRef.textContent = "🔊";
+            // Immediately read the last message if one exists
+            if (lastProcessedMessage && lastProcessedMessage.trim() !== "") {
+              audioQueue.stopAll();
+              console.log("Immediate TTS for last message:", lastProcessedMessage);
+              playTTS(lastProcessedMessage);
+            }
+          } else {
+            window.playButtonRef.textContent = "🔇";
+            audioQueue.stopAll();
+          }
+        } else {
+          console.error("No Play btn");
+        }
+    }
+    loadConfig(); 
+
+    function initializeChatbot() {
+        // --- PostHog Identify User ---
+        const uniqueUserID = getOrSetUserID();
+        posthog.identify(uniqueUserID);
+        console.log('PostHog user identified:', uniqueUserID);
+        // --- End PostHog Identify User ---
+
+        Chatbot.init({
+            chatflowid: schatflowId,
+            apiHost: apiHost,
+            apiKey: apiKey,
+            chatflowConfig: {},
+            theme: {
+                button: {
+                    backgroundColor: '#ffffff',
+                    color:'#060606',
+                    right: 20,
+                    bottom: 20,
+                    size: 85,
+                    dragAndDrop: true,
+                    iconColor: '#8000ff',
+                    customIconSrc: 'Black and White Circle Business Logo (2).png',
+                    autoWindowOpen: {
+                        autoOpen: true,
+                        openDelay: 2,
+                        autoOpenOnMobile: false
+                    }
+                },
+                tooltip: {
+                    showTooltip: true,
+                    tooltipMessage: 'Chat With AI !',
+                    tooltipBackgroundColor: 'black',
+                    tooltipTextColor: 'white',
+                    tooltipFontSize: 16
+                },
+                disclaimer: {
+                    title: 'Disclaimer',
+                    message: "By using this smart assistant, you agree to all terms of use and the website's privacy policy.",
+                    textColor: 'black',
+                    buttonColor: '#663cd7',
+                    buttonText: 'ابدأ المحادثه',
+                    buttonTextColor: 'white',
+                    blurredBackgroundColor: 'rgba(0, 0, 0, 0.4)',
+                    backgroundColor: 'white'
+                },
+                // ----- MODIFICATION STARTS HERE -----
+                customCSS: `
+                `,
+                // ----- MODIFICATION ENDS HERE -----
+                chatWindow: {
+                    showTitle: true,
+                    showAgentMessages: true,
+                    title: createTitleWithPlayButton(),
+                    titleAvatarSrc: 'Black and White Circle Business Logo (1).png',
+                    textColor: 'black',
+                    welcomeMessage: 'Hello, and welcome to our website, 24SmartTechnologies. I am your virtual assistant, here to help you with any questions or concerns you may have. Please feel free to ask me anything, and I will do my best to assist you.',
+                    errorMessage: 'Sorry, I am unable to assist you at the moment. Please try again later.',
+                    backgroundColor: '#ffffff',
+                    backgroundImage: 'enter image path or link',
+                    poweredByTextColor: "#ffffff",
+                    height: 600,
+                    width: 525,
+                    fontSize: 16,
+                    starterPrompts: [
+                        "Where are you located?",
+                        "What services do you offer?",
+                    ],
+                    starterPromptFontSize: 15,
+                    clearChatOnReload: false,
+                    sourceDocsTitle: 'Sources:',
+                    renderHTML: true,
+                    botMessage: {
+                        backgroundColor: '#f7f8ff',
+                        textColor: '#303235',
+                        showAvatar: true,
+                        avatarSrc: 'chatbot.jpeg'
+                    },
+                    userMessage: {
+                        backgroundColor: '#663cd7',
+                        textColor: '#ffffff',
+                        showAvatar: false,
+                        avatarSrc: '/home/ahmedelheity/Downloads/Untitled design (1).png'
+                    },
+                    textInput: {
+                        placeholder: 'Ask me anything...',
+                        backgroundColor: '#ffffff',
+                        textColor: '#303235',
+                        sendButtonColor: '#2b00ff',
+                        maxChars: 2000,
+                        maxCharsWarningMessage: 'You exceeded the characters limit. Please input less than 2000 characters.',
+                        autoFocus: true,
+                        sendMessageSound: true,
+                        sendSoundLocation: 'send_message.mp3',
+                        receiveMessageSound: true,
+                        receiveSoundLocation: 'receive_message.mp3'
+                    },
+                    feedback: {
+                        color: '#303235'
+                    },
+                    dateTimeToggle: {
+                        date: true,
+                        time: true
+                    },
+                    footer: {
+                        textColor: '#303235',
+                        text: 'All Rights Reserved. Powered By',
+                        company: '24SmartTechnologies © 2025',
+                        companyLink: 'https://smarter4it.com/'
+                    }
+
+                }
+            },
+            observersConfig: {
+                // User input has changed
+                //observeUserInput: (userInput) => {
+                  // console.log({ userInput });
+                //},
+                // The bot message stack
+                observeMessages: (messages) => {
+                    const lastMessageObj = messages[messages.length - 1];
+                    if (!lastMessageObj) return;
+
+                    if (lastMessageObj.type === "userMessage") {
+                        // Store user message details
+                        if (lastMessageObj.message) {
+                            lastUserMessageContent = lastMessageObj.message; // Store the content
+                            lastUserMessageTimestamp = Date.now(); // Record timestamp for response time calculation
+                            console.log("Stored user message for logging.");
+                        }
+                    } else if (lastMessageObj.type === "apiMessage") {
+                        // Only trigger TTS and logging for bot messages
+                        if (lastMessageObj.message && lastMessageObj.message !== lastProcessedMessage) {
+                            lastProcessedMessage = lastMessageObj.message; // Update last processed *full* message potentially
+
+                            // Clear previous debounce timer
+                            if (ttsDebounceTimeout) clearTimeout(ttsDebounceTimeout);
+
+                            // Wait 1 second after the last update before firing TTS & Logging
+                            ttsDebounceTimeout = setTimeout(() => {
+                                const finalBotMessage = lastProcessedMessage; // Use the message stored when timeout was set
+                                const cleanedMessage = cleanMessage(finalBotMessage);
+
+                                // --- Combined Interaction Logging ---
+                                if (cleanedMessage && lastUserMessageContent) {
+                                    let responseTime = null;
+                                    if (lastUserMessageTimestamp) {
+                                        responseTime = Date.now() - lastUserMessageTimestamp;
+                                        // Don't reset lastUserMessageTimestamp here, keep it for potential future calculations if needed
+                                    }
+
+                                    posthog.capture('chat_interaction', {
+                                        user_prompt: lastUserMessageContent,
+                                        user_prompt_length: lastUserMessageContent.length,
+                                        bot_response: cleanedMessage,
+                                        bot_response_length: cleanedMessage.length,
+                                        response_time_ms: responseTime
+                                    });
+                                    console.log("Logged PostHog event: chat_interaction");
+
+                                    // --- PostHog People Increment ---
+                                    posthog.people.increment({
+                                        'total_user_prompt_length': lastUserMessageContent.length,
+                                        'total_bot_response_length': cleanedMessage.length
+                                    });
+                                    console.log("Incremented PostHog user properties");
+                                    // --- End PostHog People Increment ---
+
+                                    // Reset last user message *after* logging to ensure it's tied to this response
+                                    lastUserMessageContent = null;
+                                    lastUserMessageTimestamp = null;
+
+                                } else {
+                                     console.log("Skipping PostHog logging: Missing cleaned bot message or previous user message.");
+                                }
+                                // --- End Combined Interaction Logging ---
+
+
+                                // --- TTS ---
+                                if (ttsEnabled) {
+                                    audioQueue.stopAll();
+                                    console.log("Final Bot TTS:", cleanedMessage);
+                                    playTTS(cleanedMessage);
+                                }
+                                // --- End TTS ---
+
+                            }, 1000); // 1-second debounce
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async function loadConfig() {
+        try {
+            const configResponse = await fetch("https://ns1.smart24services.com/get-config");
+            const configData = await configResponse.json();
+            schatflowId = configData.schatflowId;
+            apiHost = configData.apiHost;
+            googleTtsApi = configData.googleTtsApi;
+            stokenerEndpoint = configData.stokenerEndpoint;
+    
+            const apiKeyResponse = await fetch("https://ns1.smart24services.com/get-api-key");
+            const apiKeyData = await apiKeyResponse.json();
+            apiKey = apiKeyData.apiKey;
+    
+            initializeChatbot();  // ✅ Call it AFTER config loads
+        } catch (error) {
+            console.error("❌ Failed to load config:", error);
+        }
+    }
+
+    class AudioQueue {
+        constructor() {
+          this.queue = [];
+          this.currentAudio = null;
+          this.isPlaying = false;
+        }
+  
+        addAudio(audio) {
+          this.queue.push(audio);
+          if (!this.isPlaying) {
+            this.playNext();
+          }
+        }
+  
+        async playNext() {
+          if (this.queue.length === 0) {
+            this.isPlaying = false;
+            return;
+          }
+          this.isPlaying = true;
+          this.currentAudio = this.queue.shift();
+          this.currentAudio.addEventListener("ended", () => {
+            this.currentAudio = null;
+            this.playNext();
+          });
+          try {
+            await this.currentAudio.play();
+          } catch (error) {
+            console.error("Error playing audio:", error);
+            this.playNext();
+          }
+        }
+  
+        stopAll() {
+          if (this.currentAudio) {
+            this.currentAudio.pause();
+            this.currentAudio.currentTime = 0;
+            this.currentAudio = null;
+          }
+          this.queue = [];
+          this.isPlaying = false;
+        }
+    }
+  
+    function chunkText(text, chunkSize = 80) {
+        const words = text.split(' ');
+        const chunks = [];
+        let currentChunk = [];
+        let currentLength = 0;
+    
+        for (const word of words) {
+            if (currentLength + word.length > chunkSize) {
+                chunks.push(currentChunk.join(' '));
+                currentChunk = [word];
+                currentLength = word.length;
+            } else {
+                currentChunk.push(word);
+                currentLength += word.length + 1;
+            }
+        }
+    
+        if (currentChunk.length > 0) {
+            chunks.push(currentChunk.join(' '));
+        }
+    
+        return chunks;
+    }
+
+    function chunkText2(text, tokenLimit = 50) {
+        if (text !== "") {
+        const words = text.split(' ');
+        const chunks = [];
+        let currentChunk = [];
+        let currentLength = 0;
+    
+        for (const word of words) {
+            currentChunk.push(word);
+            currentLength++;
+    
+            if (currentLength >= tokenLimit && word.includes('.')) {
+                chunks.push(currentChunk.join(' '));
+                currentChunk = [];
+                currentLength = 0;
+            }
+        }
+    
+        if (currentChunk.length > 0) {
+            chunks.push(currentChunk.join(' '));
+        }
+    
+        return chunks;
+
+        }
+        
+    }
+    
+    const audioQueue = new AudioQueue();
+     
+    async function fetchGoogleAccessToken() {
+	    try {
+		const response = await fetch(stokenerEndpoint);  // Replace with your backend URL
+		if (!response.ok) throw new Error("Failed to fetch token");
+
+		const data = await response.json();
+		if (data.access_token) {
+		    console.log("✅ Got New Access Token");
+		    return data.access_token;
+		} else {
+		    throw new Error("Invalid token response");
+		}
+	    } catch (error) {
+		console.error("❌ Error Fetching Token:", error);
+		return null;
+	    }
+	}
+	function splitTextByLanguage(text) {
+        const words = text.split(/\s+/);
+        let chunks = [];
+        let currentChunk = [];
+        let currentLang = detectLanguage(words[0]);
+    
+        words.forEach(word => {
+            const lang = detectLanguage(word);
+            if (lang !== currentLang && currentChunk.length > 0) {
+                chunks.push({ text: currentChunk.join(" "), lang: currentLang });
+                currentChunk = [];
+            }
+            currentChunk.push(word);
+            currentLang = lang;
+        });
+    
+        if (currentChunk.length > 0) {
+            chunks.push({ text: currentChunk.join(" "), lang: currentLang });
+        }
+    
+        return chunks;
+    }
+    function detectLanguage(text) {
+        return /[\u0600-\u06FF]/.test(text) ? "ar-XA" : "en-US";
+    }
+    
+
+    async function playTTS(text) {
+        if (!ttsEnabled) {
+            console.log("🔇 TTS is disabled, skipping playback.");
+            return;
+        }
+    
+        const cleanedText = cleanMessage(text); // ✅ Clean the text first
+    
+        if (!cleanedText) {
+            console.log("🚨 No valid text after cleaning. Skipping TTS.");
+            return; // Stop if the text is empty after cleaning
+        }
+    
+        // ✅ Split text into Arabic & English chunks
+        const chunks = splitTextByLanguage(cleanedText);
+        console.log("✅ Processed TTS chunks:", chunks);
+    
+        for (let i = 0; i < chunks.length; i++) {
+            if (i > 0) {
+                await new Promise(resolve => setTimeout(resolve, 300)); // Slight delay for smooth transitions
+            }
+    
+            const accessToken = await fetchGoogleAccessToken();
+            if (!accessToken) {
+                console.error("❌ No valid Google TTS access token");
+                return;
+            }
+    
+            const requestBody = {
+                input: { text: chunks[i].text },
+                voice: {
+                    languageCode: chunks[i].lang,
+                    name: chunks[i].lang === "ar-XA" ? "ar-XA-Wavenet-B" : "en-US-Wavenet-D"
+                },
+                audioConfig: { audioEncoding: "LINEAR16" }
+            };
+    
+            try {
+                const response = await fetch(googleTtsApi, {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${accessToken}`,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+    
+                if (response.ok) {
+                    const responseData = await response.json();
+                    if (responseData.audioContent) {
+                        const audioData = atob(responseData.audioContent);
+                        const audioBlob = new Blob([new Uint8Array([...audioData].map(c => c.charCodeAt(0)))], { type: "audio/wav" });
+                        const audioUrl = URL.createObjectURL(audioBlob);
+                        const audio = new Audio(audioUrl);
+                        audioQueue.addAudio(audio);
+                    }
+                } else {
+                    console.error("❌ Google TTS API Error:", await response.text());
+                }
+            } catch (error) {
+                console.error("❌ Network Error:", error);
+            }
+        }
+    }
+    async function playAudio(audio) {
+        return new Promise(resolve => {
+            audio.play();
+            audio.onended = resolve;
+        });
+    }
+    
+    createAudioButton();
+    
+</script>
